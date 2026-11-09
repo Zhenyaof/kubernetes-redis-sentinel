@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sentinel
+  namespace: redis-lab
+spec:
+  serviceName: sentinel-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: redis-sentinel
+  template:
+    metadata:
+      labels:
+        app: redis-sentinel
+    spec:
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: sentinel
+          image: redis:7.4.12-alpine3.21
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - /scripts/sentinel-entrypoint.sh
+          ports:
+            - name: sentinel
+              containerPort: 26379
+              protocol: TCP
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: password
+          volumeMounts:
+            - name: sentinel-data
+              mountPath: /data
+            - name: sentinel-entrypoint
+              mountPath: /scripts
+              readOnly: true
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'redis-cli -h 127.0.0.1 -p 26379 PING | grep -q PONG'
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'redis-cli -h 127.0.0.1 -p 26379 PING | grep -q PONG'
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'redis-cli -h 127.0.0.1 -p 26379 SENTINEL get-master-addr-by-name mymaster >/dev/null'
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: sentinel-entrypoint
+          configMap:
+            name: sentinel-entrypoint
+            defaultMode: 0555
+  volumeClaimTemplates:
+    - metadata:
+        name: sentinel-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 256Mi

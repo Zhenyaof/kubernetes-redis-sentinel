@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: redis-lab
+spec:
+  serviceName: redis-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: redis
+          image: redis:7.4.12-alpine3.21
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - /scripts/redis-entrypoint.sh
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: password
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+            - name: redis-entrypoint
+              mountPath: /scripts
+              readOnly: true
+            - name: redis-tmp
+              mountPath: /tmp
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli -h 127.0.0.1 PING | grep -q PONG'
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli -h 127.0.0.1 PING | grep -q PONG'
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli -h 127.0.0.1 PING | grep -q PONG && REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --raw -h 127.0.0.1 ROLE | head -n 1 | grep -qx master'
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: redis-entrypoint
+          configMap:
+            name: redis-entrypoint
+            defaultMode: 0555
+        - name: redis-tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 1Gi

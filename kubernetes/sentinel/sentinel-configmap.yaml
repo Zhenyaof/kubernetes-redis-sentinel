@@ -1,0 +1,37 @@
+apiVersion: v1
+data:
+  sentinel-entrypoint.sh: |
+    #!/bin/sh
+    set -eu
+
+    : "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+
+    CONFIG=/data/sentinel.conf
+    umask 077
+
+    if [ ! -f "$CONFIG" ]; then
+        cat > "$CONFIG" <<CONF
+    port 26379
+    bind 0.0.0.0
+    protected-mode no
+    daemonize no
+    logfile ""
+    dir /data
+
+    sentinel resolve-hostnames yes
+    sentinel monitor mymaster redis-0.redis-headless.redis-lab.svc.cluster.local 6379 2
+    sentinel auth-pass mymaster ${REDIS_PASSWORD}
+    sentinel down-after-milliseconds mymaster 5000
+    sentinel failover-timeout mymaster 10000
+    sentinel parallel-syncs mymaster 1
+    CONF
+    fi
+
+    chmod 600 "$CONFIG"
+
+    echo "Starting Redis Sentinel: ${HOSTNAME}"
+    exec redis-server "$CONFIG" --sentinel
+kind: ConfigMap
+metadata:
+  name: sentinel-entrypoint
+  namespace: redis-lab

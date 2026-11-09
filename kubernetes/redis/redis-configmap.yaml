@@ -1,0 +1,158 @@
+apiVersion: v1
+data:
+  redis-entrypoint.sh: |
+    #!/bin/sh
+    set -eu
+
+    : "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+    : "${POD_NAME:?POD_NAME is required}"
+    : "${POD_IP:?POD_IP is required}"
+
+    DATA_DIR=/data
+    MARKER="${DATA_DIR}/.redis-initialized"
+    REDIS_HOST="redis-0.redis-headless.redis-lab.svc.cluster.local"
+    POD_FQDN="${POD_NAME}.redis-headless.redis-lab.svc.cluster.local"
+    CONFIG=/tmp/redis.conf
+
+    umask 077
+
+    echo "Starting Redis: ${POD_NAME}"
+
+    if [ ! -f "$MARKER" ]; then
+        if [ "$POD_NAME" = "redis-0" ]; then
+            ROLE=master
+            echo "Initial bootstrap: redis-0 becomes master"
+        else
+            ROLE=replica
+            MASTER_HOST="$REDIS_HOST"
+            MASTER_PORT=6379
+
+            echo "Initial bootstrap: waiting for redis-0"
+
+            until REDISCLI_AUTH="$REDIS_PASSWORD" \
+                redis-cli -h "$MASTER_HOST" PING 2>/dev/null | grep -q PONG; do
+                sleep 2
+            done
+        fi
+    else
+        ROLE=discover
+        echo "Existing data: checking Sentinel quorum"
+
+        PREVIOUS_MASTER_INFO=
+        STABLE_ROUNDS=0
+
+        while :; do
+            RESPONSES=$(mktemp)
+
+            for sentinel in \
+                sentinel-0.sentinel-headless.redis-lab.svc.cluster.local \
+                sentinel-1.sentinel-headless.redis-lab.svc.cluster.local \
+                sentinel-2.sentinel-headless.redis-lab.svc.cluster.local
+            do
+                INFO=$(redis-cli --raw -h "$sentinel" -p 26379 \
+                    SENTINEL get-master-addr-by-name mymaster 2>/dev/null || true)
+
+                HOST=$(printf '%s\n' "$INFO" | sed -n '1p')
+                PORT=$(printf '%s\n' "$INFO" | sed -n '2p')
+
+                case "$PORT" in
+                    ''|*[!0-9]*) continue ;;
+                esac
+
+                [ -n "$HOST" ] && printf '%s %s\n' "$HOST" "$PORT" >> "$RESPONSES"
+            done
+
+            MASTER_INFO=$(awk '
+                NF == 2 {
+                    key = $1 " " $2
+                    count[key]++
+                    if (count[key] >= 2) {
+                        print key
+                        exit
+                    }
+                }
+            ' "$RESPONSES")
+
+            rm -f "$RESPONSES"
+
+            if [ -n "$MASTER_INFO" ]; then
+                if [ "$MASTER_INFO" = "$PREVIOUS_MASTER_INFO" ]; then
+                    STABLE_ROUNDS=$((STABLE_ROUNDS + 1))
+                else
+                    PREVIOUS_MASTER_INFO=$MASTER_INFO
+                    STABLE_ROUNDS=1
+                fi
+
+                echo "Sentinel majority: ${MASTER_INFO} (stable round ${STABLE_ROUNDS}/3)"
+
+                if [ "$STABLE_ROUNDS" -ge 3 ]; then
+                    set -- $MASTER_INFO
+                    MASTER_HOST=$1
+                    MASTER_PORT=$2
+                    break
+                fi
+            else
+                echo "Sentinel majority not established; resetting stability check"
+                PREVIOUS_MASTER_INFO=
+                STABLE_ROUNDS=0
+            fi
+
+            sleep 2
+        done
+
+        if [ "$MASTER_HOST" = "$POD_IP" ] || \
+           [ "$MASTER_HOST" = "$POD_FQDN" ] || \
+           [ "$MASTER_HOST" = "$POD_NAME" ]; then
+            ROLE=master
+        else
+            ROLE=replica
+        fi
+
+        echo "Confirmed master: ${MASTER_HOST}:${MASTER_PORT}"
+        echo "Selected role: ${ROLE}"
+    fi
+
+    {
+        echo "port 6379"
+        echo "bind 0.0.0.0"
+        echo "protected-mode yes"
+        echo "dir ${DATA_DIR}"
+        echo "appendonly yes"
+        echo "requirepass ${REDIS_PASSWORD}"
+        echo "masterauth ${REDIS_PASSWORD}"
+        echo "maxmemory 128mb"
+        echo "maxmemory-policy noeviction"
+        echo "replica-read-only yes"
+
+        if [ "$ROLE" = "replica" ]; then
+            echo "replicaof ${MASTER_HOST} ${MASTER_PORT}"
+        fi
+    } > "$CONFIG"
+
+    redis-server "$CONFIG" &
+    REDIS_PID=$!
+
+    cleanup() {
+        kill "$REDIS_PID" 2>/dev/null || true
+        wait "$REDIS_PID" 2>/dev/null || true
+    }
+    trap cleanup TERM INT
+
+    until REDISCLI_AUTH="$REDIS_PASSWORD" \
+        redis-cli -h 127.0.0.1 PING 2>/dev/null | grep -q PONG; do
+        if ! kill -0 "$REDIS_PID" 2>/dev/null; then
+            echo "Redis exited during startup"
+            wait "$REDIS_PID" || true
+            exit 1
+        fi
+        sleep 1
+    done
+
+    touch "$MARKER"
+    echo "Redis started successfully: ${ROLE}"
+
+    wait "$REDIS_PID"
+kind: ConfigMap
+metadata:
+  name: redis-entrypoint
+  namespace: redis-lab
