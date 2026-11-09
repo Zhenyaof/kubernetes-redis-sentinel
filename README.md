@@ -24,12 +24,15 @@ high availability.
 - Redis replicas synchronize data from the master.
 - Sentinel promotes a replica after master Pod failure.
 - Redis instances recover their roles after Pod recreation.
-- Recreated Redis replicas discover the promoted master.
+- Recreated Redis replicas discover the promoted master using Sentinel
+  discovery and validate the candidate with authenticated PING and ROLE
+  commands before configuring replication.
 - PVC-backed data survives Redis Pod recreation.
 - Replication resumes with two online replicas.
 
-These results were manually verified in the development environment.
-Automated acceptance tests are planned.
+These results have been verified using automated acceptance tests.
+See [Test Results](docs/test-results.md) for the executed test scenarios
+and their outcomes.
 
 ## Repository structure
 
@@ -77,7 +80,7 @@ Inspect the deployment:
 
 ## Testing
 
-Manual verification has covered:
+Verification coverage:
 
 - Redis replication and data synchronization.
 - Sentinel quorum.
@@ -85,7 +88,12 @@ Manual verification has covered:
 - Redis Pod recreation and role recovery.
 - Persistence of data on PVC-backed storage.
 
-Automated acceptance tests are planned.
+Automated acceptance tests:
+
+- `tests/acceptance/redis-sentinel-acceptance.sh`
+- `tests/acceptance/redis-sentinel-failover.sh`
+
+See [Test Results](docs/test-results.md) for execution details.
 
 ## Security and limitations
 

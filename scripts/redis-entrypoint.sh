@@ -84,9 +84,32 @@ else
 
             if [ "$STABLE_ROUNDS" -ge 3 ]; then
                 set -- $MASTER_INFO
-                MASTER_HOST=$1
-                MASTER_PORT=$2
-                break
+                CANDIDATE_HOST=$1
+                CANDIDATE_PORT=$2
+
+                echo "Validating candidate master: ${CANDIDATE_HOST}:${CANDIDATE_PORT}"
+
+                CANDIDATE_PING=$(REDISCLI_AUTH="$REDIS_PASSWORD" \
+                    redis-cli --raw -h "$CANDIDATE_HOST" -p "$CANDIDATE_PORT" \
+                    PING 2>/dev/null || true)
+
+                CANDIDATE_ROLE_INFO=$(REDISCLI_AUTH="$REDIS_PASSWORD" \
+                    redis-cli --raw -h "$CANDIDATE_HOST" -p "$CANDIDATE_PORT" \
+                    ROLE 2>/dev/null || true)
+
+                CANDIDATE_ROLE=$(printf '%s\\n' "$CANDIDATE_ROLE_INFO" | sed -n '1p')
+
+                if [ "$CANDIDATE_PING" = "PONG" ] && \
+                   [ "$CANDIDATE_ROLE" = "master" ]; then
+                    MASTER_HOST=$CANDIDATE_HOST
+                    MASTER_PORT=$CANDIDATE_PORT
+                    echo "Candidate is reachable and confirms ROLE=master"
+                    break
+                fi
+
+                echo "Candidate is not yet a reachable master; continuing discovery"
+                PREVIOUS_MASTER_INFO=
+                STABLE_ROUNDS=0
             fi
         else
             echo "Sentinel majority not established; resetting stability check"
